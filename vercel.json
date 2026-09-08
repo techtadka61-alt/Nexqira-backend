@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "routes": [
+    { "src": "/api/cron-generate", "dest": "/api/cron-generate.js" },
+    { "src": "/api/(.*)", "dest": "/api/index.js" }
+  ],
+  "functions": {
+    "api/cron-generate.js": {
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cron-generate",
+      "schedule": "30 3 * * *"
+    }
+  ]
+}
+
