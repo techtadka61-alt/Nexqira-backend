@@ -1,4 +1,6 @@
 const Post = require('../models/Post');
+
+const publicSiteUrl = String(process.env.PUBLIC_SITE_URL || 'https://nexqira.online').trim().replace(/\/$/, '');
 const Log = require('../models/Log');
 const linkedinService = require('../services/linkedinService');
 
@@ -97,7 +99,7 @@ const publishToBlog = async (post) => {
   post.metadata.blogPost = {
     ...(post.metadata.blogPost || {}),
     publishedAt: new Date(),
-    url: `https://nexqira.online/blog/${post.slug}`,
+    url: `${publicSiteUrl}/blog/${post.slug}`,
     status: 'published'
   };
   post.metadata.platformStatus.blog = {

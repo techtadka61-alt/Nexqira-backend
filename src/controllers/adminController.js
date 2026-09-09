@@ -4,6 +4,8 @@ const Log = require('../models/Log');
 const linkedinService = require('../services/linkedinService');
 const { sendApprovalEmailForPost } = require('../services/approvalService');
 
+const publicSiteUrl = String(process.env.PUBLIC_SITE_URL || 'https://nexqira.online').trim().replace(/\/$/, '');
+
 const coercePrimaryCategory = (category, metadata) => {
   const cat = String(category || '').trim();
   if (cat) return cat;
@@ -18,7 +20,7 @@ const publishToBlog = async (post) => {
   post.metadata.blogPost = {
     ...(post.metadata.blogPost || {}),
     publishedAt: new Date(),
-    url: `https://nexqira.online/blog/${post.slug}`,
+    url: `${publicSiteUrl}/blog/${post.slug}`,
     status: 'published'
   };
   post.metadata.platformStatus = post.metadata.platformStatus || {};
