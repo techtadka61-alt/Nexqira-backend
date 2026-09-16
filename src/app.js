@@ -38,7 +38,7 @@ const staticAllowedOrigins = new Set([
   'https://www.nexqira.online',
   'https://nexqira.online',
   'https://aayam-ai-admin.vercel.app',
-  'https://nexqira-admin.vercel.app/'
+  'https://nexqira-admin.vercel.app',
 ]);
 
 if (process.env.FRONTEND_ORIGIN) {
