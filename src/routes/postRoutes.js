@@ -8,6 +8,7 @@ const {
   getStats,
   updatePost,
   publishPost,
+  unpublishPost,
   deletePost,
 } = require('../controllers/postController');
 const { protect, admin } = require('../middleware/auth');
@@ -23,5 +24,6 @@ router.delete('/:id', protect, admin, deletePost);
 router.put('/:id/approve', protect, admin, approvePost);
 router.put('/:id/reject', protect, admin, rejectPost);
 router.post('/:id/publish', protect, admin, publishPost);
+router.post('/:id/unpublish', protect, admin, unpublishPost);
 
 module.exports = router;

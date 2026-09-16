@@ -90,4 +90,116 @@ const submitContact = async (req, res) => {
   }
 };
 
-module.exports = { submitContact };
+// Admin: list contact submissions with search/date filter/pagination
+const getContacts = async (req, res) => {
+  try {
+    const { search, from, to, page = 1, limit = 20, sort = 'newest' } = req.query;
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+
+    const query = {};
+
+    if (search) {
+      const term = String(search).trim();
+      if (term) {
+        const regex = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        query.$or = [{ name: regex }, { email: regex }];
+      }
+    }
+
+    if (from || to) {
+      query.createdAt = {};
+      if (from) query.createdAt.$gte = new Date(from);
+      if (to) query.createdAt.$lte = new Date(to);
+    }
+
+    const sortOrder = sort === 'oldest' ? 1 : -1;
+
+    const [items, total] = await Promise.all([
+      ContactMessage.find(query)
+        .sort({ createdAt: sortOrder })
+        .limit(limitNum)
+        .skip((pageNum - 1) * limitNum),
+      ContactMessage.countDocuments(query)
+    ]);
+
+    res.json({
+      items,
+      total,
+      page: pageNum,
+      pages: Math.ceil(total / limitNum) || 1
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Admin: get single contact submission
+const getContact = async (req, res) => {
+  try {
+    const contact = await ContactMessage.findById(req.params.id);
+    if (!contact) {
+      return res.status(404).json({ success: false, message: 'Contact submission not found' });
+    }
+    res.json(contact);
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Admin: delete contact submission
+const deleteContact = async (req, res) => {
+  try {
+    const contact = await ContactMessage.findByIdAndDelete(req.params.id);
+    if (!contact) {
+      return res.status(404).json({ success: false, message: 'Contact submission not found' });
+    }
+    res.json({ success: true, deletedId: contact._id });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Admin: stats for current week vs previous week (for dashboard card)
+const getContactStats = async (req, res) => {
+  try {
+    const now = new Date();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const startOfWeek = new Date(now.getTime() - now.getDay() * dayMs);
+    startOfWeek.setHours(0, 0, 0, 0);
+    const startOfPrevWeek = new Date(startOfWeek.getTime() - 7 * dayMs);
+
+    const [thisWeek, lastWeek, total] = await Promise.all([
+      ContactMessage.countDocuments({ createdAt: { $gte: startOfWeek } }),
+      ContactMessage.countDocuments({ createdAt: { $gte: startOfPrevWeek, $lt: startOfWeek } }),
+      ContactMessage.countDocuments()
+    ]);
+
+    const percentChange = lastWeek > 0
+      ? Math.round(((thisWeek - lastWeek) / lastWeek) * 100)
+      : (thisWeek > 0 ? 100 : 0);
+
+    const daily = await ContactMessage.aggregate([
+      { $match: { createdAt: { $gte: startOfWeek } } },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+
+    res.json({
+      thisWeek,
+      lastWeek,
+      percentChange,
+      total,
+      daily: daily.map((d) => ({ date: d._id, count: d.count }))
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+module.exports = { submitContact, getContacts, getContact, deleteContact, getContactStats };

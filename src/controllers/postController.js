@@ -591,6 +591,41 @@ const publishPost = async (req, res) => {
   }
 };
 
+// Unpublish a post from the blog platform (revert to draft/pending)
+const unpublishPost = async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+    if (!post) return res.status(404).json({ message: 'Post not found' });
+
+    ensurePlatformStatus(post);
+    post.metadata = post.metadata || {};
+    post.metadata.platformStatus = post.metadata.platformStatus || {};
+    post.metadata.platformStatus.blog = {
+      ...(post.metadata.platformStatus.blog || {}),
+      status: 'pending',
+    };
+    if (post.metadata.blogPost) {
+      post.metadata.blogPost.status = 'unpublished';
+    }
+    post.markModified('metadata');
+
+    recomputeOverallStatus(post);
+    await post.save();
+
+    await Log.create({
+      level: 'info',
+      message: `Post unpublished: ${post.blogTitle || post.title}`,
+      category: 'system',
+      userId: req.user?._id,
+      postId: post._id,
+    });
+
+    res.json({ message: 'Post unpublished', post });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // Create post (from generated news)
 const createPost = async (req, res) => {
   try {
@@ -740,4 +775,5 @@ module.exports = {
   getStats,
   updatePost,
   publishPost,
+  unpublishPost,
 };
