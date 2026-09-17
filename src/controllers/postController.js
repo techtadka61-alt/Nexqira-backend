@@ -172,7 +172,7 @@ const publishToLinkedIn = async (post, { updateExisting = false } = {}) => {
 // Get all posts
 const getPosts = async (req, res) => {
   try {
-    const { status, platform, page = 1, limit = 20 } = req.query;
+    const { status, platform, search, from, to, page = 1, limit = 20 } = req.query;
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
     const query = {};
@@ -182,6 +182,16 @@ const getPosts = async (req, res) => {
         .map((s) => s.trim())
         .filter(Boolean);
       query.status = list.length > 1 ? { $in: list } : list[0];
+    }
+    if (search && String(search).trim()) {
+      const escaped = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      query.$or = [{ title: regex }, { blogTitle: regex }, { category: regex }, { slug: regex }];
+    }
+    if (from || to) {
+      query.createdAt = {};
+      if (from) query.createdAt.$gte = new Date(`${String(from).slice(0, 10)}T00:00:00.000Z`);
+      if (to) query.createdAt.$lte = new Date(`${String(to).slice(0, 10)}T23:59:59.999Z`);
     }
 
     // If platform filter is provided, prefer per-platform status (metadata.platformStatus.<platform>.status)

@@ -1,6 +1,6 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
-const { trackVisit, getMonthlyStats } = require('../controllers/analyticsController');
+const { trackVisit, getMonthlyStats, getVisitors, getVisitor } = require('../controllers/analyticsController');
 const { protect, admin } = require('../middleware/auth');
 
 const router = express.Router();
@@ -17,5 +17,7 @@ router.post('/track', trackLimiter, trackVisit);
 
 // Admin: visitor stats
 router.get('/visitors/monthly', protect, admin, getMonthlyStats);
+router.get('/visitors', protect, admin, getVisitors);
+router.get('/visitors/:id', protect, admin, getVisitor);
 
 module.exports = router;

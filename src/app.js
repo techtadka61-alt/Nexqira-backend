@@ -23,6 +23,7 @@ const analyticsRoutes = require('./routes/analyticsRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
 
 const app = express();
+app.set('trust proxy', 1);
 const API_PREFIX = '/api/v1';
 
 app.use(helmet());
