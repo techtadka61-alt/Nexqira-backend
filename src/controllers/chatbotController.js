@@ -5,6 +5,7 @@ const sendMessage = async (req, res) => {
     const reply = await getChatbotReply({
       message: req.body?.message,
       history: req.body?.history,
+      sessionId: String(req.body?.sessionId || '').trim().slice(0, 100),
       meta: {
         ip: String(req.headers['x-forwarded-for'] || req.ip || '').trim(),
         userAgent: String(req.get('user-agent') || '').trim(),

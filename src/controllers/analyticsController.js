@@ -1,7 +1,9 @@
 // backend/src/controllers/analyticsController.js
 const crypto = require('crypto');
-const geoip = require('geoip-lite');
 const Visitor = require('../models/Visitor');
+const VisitorSession = require('../models/VisitorSession');
+const PageViewEvent = require('../models/PageViewEvent');
+const { resolveLocation } = require('../services/geoService');
 
 const VISITOR_SALT = process.env.VISITOR_HASH_SALT || process.env.JWT_SECRET || 'nexqira-visitor-salt';
 
@@ -31,31 +33,6 @@ function parseDevice(userAgent = '') {
   return { type, os, browser };
 }
 
-function getHeaderLocation(req) {
-  return {
-    country: String(req.headers['x-vercel-ip-country'] || req.headers['cf-ipcountry'] || ''),
-    region: String(req.headers['x-vercel-ip-country-region'] || ''),
-    city: String(req.headers['x-vercel-ip-city'] || ''),
-    timezone: String(req.headers['x-vercel-ip-timezone'] || '')
-  };
-}
-
-function resolveLocation(req, ip) {
-  const headerLocation = getHeaderLocation(req);
-  if (headerLocation.city || headerLocation.country) return headerLocation;
-  const geo = geoip.lookup(ip);
-  if (!geo) return headerLocation;
-  return {
-    country: geo.country || '',
-    region: geo.region || '',
-    city: geo.city || '',
-    postal: geo.metro ? String(geo.metro) : '',
-    latitude: geo.ll?.[0],
-    longitude: geo.ll?.[1],
-    timezone: geo.timezone || ''
-  };
-}
-
 function dateRange(query) {
   const range = {};
   if (query.from) range.$gte = new Date(`${String(query.from).slice(0, 10)}T00:00:00.000Z`);
@@ -76,7 +53,7 @@ const trackVisit = async (req, res) => {
 
     const existing = await Visitor.findOne({ ip }).select('_id').lean();
     const set = { lastSeenAt: new Date(), path, userAgent: String(userAgent || '').slice(0, 1000), device: parseDevice(userAgent) };
-    if (!existing) set.location = resolveLocation(req, ip);
+    if (!existing) set.location = await resolveLocation(req, ip);
     await Visitor.findOneAndUpdate(
       { ip },
       {
@@ -166,4 +143,253 @@ const getMonthlyStats = async (req, res) => {
   }
 };
 
-module.exports = { trackVisit, getMonthlyStats, getVisitors, getVisitor };
+// Public: called once per tab session on first page load. First-touch attribution
+// (referrer/UTM/landing page) is set only on insert and never overwritten afterwards.
+const trackSession = async (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || '').trim().slice(0, 100);
+    if (!sessionId) return res.status(204).end();
+
+    const path = String(req.body?.path || '').trim().slice(0, 300);
+    const referrer = String(req.body?.referrer || '').trim().slice(0, 500);
+    const utmInput = req.body?.utm || {};
+    const utm = {
+      source: String(utmInput.source || '').trim().slice(0, 200),
+      medium: String(utmInput.medium || '').trim().slice(0, 200),
+      campaign: String(utmInput.campaign || '').trim().slice(0, 200),
+      term: String(utmInput.term || '').trim().slice(0, 200),
+      content: String(utmInput.content || '').trim().slice(0, 200)
+    };
+
+    const ip = normalizeIp(req.headers['x-forwarded-for'] || req.ip);
+    const userAgent = req.get('user-agent');
+    const visitorHash = hashVisitor({ ip, userAgent, clientId: sessionId });
+
+    const priorSession = await VisitorSession.findOne({ visitorHash }).select('_id').lean();
+    const isReturning = Boolean(priorSession);
+    const location = await resolveLocation(req, ip);
+
+    await VisitorSession.findOneAndUpdate(
+      { sessionId },
+      {
+        $setOnInsert: {
+          visitorHash,
+          ip,
+          userAgent: String(userAgent || '').slice(0, 1000),
+          device: parseDevice(userAgent),
+          location,
+          referrer,
+          utm,
+          landingPage: path,
+          firstActivityAt: new Date(),
+          isReturning
+        },
+        $set: { lastActivityAt: new Date() }
+      },
+      { upsert: true, new: true }
+    );
+
+    res.status(204).end();
+  } catch (error) {
+    res.status(204).end();
+  }
+};
+
+// Public: called on every route change to record a page view within a session.
+const trackPageView = async (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || '').trim().slice(0, 100);
+    if (!sessionId) return res.status(204).end();
+
+    const path = String(req.body?.path || '').trim().slice(0, 300);
+    const referrer = String(req.body?.referrer || '').trim().slice(0, 500);
+
+    await Promise.all([
+      PageViewEvent.create({ sessionId, path, referrer }),
+      VisitorSession.updateOne(
+        { sessionId },
+        { $set: { lastActivityAt: new Date() }, $inc: { pageViewCount: 1 } }
+      )
+    ]);
+
+    res.status(204).end();
+  } catch (error) {
+    res.status(204).end();
+  }
+};
+
+// Admin: dashboard-v2 overview - totals, unique visitors, new vs returning, device/browser.
+const getOverview = async (req, res) => {
+  try {
+    const range = dateRange(req.query);
+    const match = range ? { firstActivityAt: range } : {};
+
+    const [totalSessions, uniqueVisitors, returningCount, devices, browsers, totalPageViews] = await Promise.all([
+      VisitorSession.countDocuments(match),
+      VisitorSession.distinct('visitorHash', match),
+      VisitorSession.countDocuments({ ...match, isReturning: true }),
+      VisitorSession.aggregate([
+        { $match: match },
+        { $group: { _id: '$device.type', count: { $sum: 1 } } },
+        { $sort: { count: -1 } }
+      ]),
+      VisitorSession.aggregate([
+        { $match: match },
+        { $group: { _id: '$device.browser', count: { $sum: 1 } } },
+        { $sort: { count: -1 } }
+      ]),
+      VisitorSession.aggregate([{ $match: match }, { $group: { _id: null, total: { $sum: '$pageViewCount' } } }])
+    ]);
+
+    res.json({
+      totalSessions,
+      uniqueVisitors: uniqueVisitors.length,
+      returningVisitors: returningCount,
+      newVisitors: totalSessions - returningCount,
+      totalPageViews: totalPageViews[0]?.total || 0,
+      devices: devices.map((d) => ({ type: d._id || 'Unknown', count: d.count })),
+      browsers: browsers.map((b) => ({ browser: b._id || 'Unknown', count: b.count }))
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Admin: visitors grouped by country/region/city for a date range.
+const getGeoBreakdown = async (req, res) => {
+  try {
+    const range = dateRange(req.query);
+    const match = range ? { firstActivityAt: range } : {};
+
+    const rows = await VisitorSession.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: { country: '$location.country', region: '$location.region', city: '$location.city' },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { count: -1 } },
+      { $limit: 200 }
+    ]);
+
+    res.json({
+      items: rows.map((r) => ({
+        country: r._id.country || 'Unknown',
+        region: r._id.region || '',
+        city: r._id.city || '',
+        count: r.count
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Admin: visitors by date/hour bucket for a date range.
+const getTimeseries = async (req, res) => {
+  try {
+    const range = dateRange(req.query);
+    const match = range ? { firstActivityAt: range } : {};
+    const granularity = req.query.granularity === 'hour' ? '%Y-%m-%dT%H:00' : '%Y-%m-%d';
+
+    const rows = await VisitorSession.aggregate([
+      { $match: match },
+      { $group: { _id: { $dateToString: { format: granularity, date: '$firstActivityAt' } }, count: { $sum: 1 } } },
+      { $sort: { _id: 1 } }
+    ]);
+
+    res.json({ items: rows.map((r) => ({ bucket: r._id, count: r.count })) });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Admin: most-visited pages and top traffic sources (referrer/UTM) for a date range.
+const getPagesAndSources = async (req, res) => {
+  try {
+    const range = dateRange(req.query);
+    const sessionMatch = range ? { firstActivityAt: range } : {};
+
+    const sessionIds = range ? await VisitorSession.distinct('sessionId', sessionMatch) : null;
+    const pageMatch = sessionIds ? { sessionId: { $in: sessionIds } } : {};
+
+    const [topPages, topSources] = await Promise.all([
+      PageViewEvent.aggregate([
+        { $match: pageMatch },
+        { $group: { _id: '$path', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 20 }
+      ]),
+      VisitorSession.aggregate([
+        { $match: sessionMatch },
+        {
+          $group: {
+            _id: { $cond: [{ $ne: ['$utm.source', ''] }, '$utm.source', { $ifNull: ['$referrer', 'direct'] }] },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { count: -1 } },
+        { $limit: 20 }
+      ])
+    ]);
+
+    res.json({
+      topPages: topPages.map((p) => ({ path: p._id || '(unknown)', count: p.count })),
+      topSources: topSources.map((s) => ({ source: s._id || 'direct', count: s.count }))
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Admin: unique visitors -> sessions -> leads funnel + conversion rate for a date range.
+const getFunnel = async (req, res) => {
+  try {
+    // Lazy require to avoid a require cycle at module load time.
+    const ContactMessage = require('../models/ContactMessage');
+    const ChatLead = require('../models/ChatLead');
+
+    const range = dateRange(req.query);
+    const sessionMatch = range ? { firstActivityAt: range } : {};
+    const leadMatch = range ? { createdAt: range } : {};
+
+    const [uniqueVisitors, totalSessions, convertedSessions, contactLeads, chatLeads] = await Promise.all([
+      VisitorSession.distinct('visitorHash', sessionMatch),
+      VisitorSession.countDocuments(sessionMatch),
+      VisitorSession.countDocuments({ ...sessionMatch, 'convertedLead.leadId': { $ne: null } }),
+      ContactMessage.countDocuments(leadMatch),
+      ChatLead.countDocuments(leadMatch)
+    ]);
+
+    const qualifiedLeads = contactLeads + chatLeads;
+    const visitorCount = uniqueVisitors.length;
+    const conversionRate = visitorCount > 0 ? Number(((qualifiedLeads / visitorCount) * 100).toFixed(2)) : 0;
+
+    res.json({
+      uniqueVisitors: visitorCount,
+      totalSessions,
+      convertedSessions,
+      qualifiedLeads,
+      contactLeads,
+      chatLeads,
+      conversionRate
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+module.exports = {
+  trackVisit,
+  trackSession,
+  trackPageView,
+  getMonthlyStats,
+  getVisitors,
+  getVisitor,
+  getOverview,
+  getGeoBreakdown,
+  getTimeseries,
+  getPagesAndSources,
+  getFunnel
+};

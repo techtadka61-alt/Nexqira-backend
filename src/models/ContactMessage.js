@@ -43,7 +43,9 @@ const contactMessageSchema = new mongoose.Schema(
       ip: { type: String, default: '' },
       userAgent: { type: String, default: '' },
       referer: { type: String, default: '' }
-    }
+    },
+    // Links back to VisitorSession.sessionId for funnel/conversion tracking.
+    sessionId: { type: String, default: '', index: true }
   },
   {
     timestamps: true

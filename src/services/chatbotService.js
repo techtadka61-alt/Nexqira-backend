@@ -1,5 +1,6 @@
 const aiService = require('./aiService');
 const ChatLead = require('../models/ChatLead');
+const VisitorSession = require('../models/VisitorSession');
 
 const BUSINESS_CONTEXT = `
 Business name: Nexqira
@@ -41,20 +42,30 @@ function extractLeadDetails(message) {
   return { name, email, phone };
 }
 
-async function saveChatLeadIfPresent({ message, history, meta }) {
+async function saveChatLeadIfPresent({ message, history, meta, sessionId }) {
   const details = extractLeadDetails(message);
   if (!details.email && !details.phone) return null;
 
-  return ChatLead.create({
+  const lead = await ChatLead.create({
     ...details,
     message: cleanMessage(message),
     conversation: buildConversation(history),
     source: 'chatbot',
+    sessionId: sessionId || '',
     meta
   });
+
+  if (sessionId) {
+    VisitorSession.updateOne(
+      { sessionId, 'convertedLead.leadId': null },
+      { $set: { 'convertedLead.leadType': 'chat', 'convertedLead.leadId': lead._id, 'convertedLead.convertedAt': new Date() } }
+    ).catch(() => {});
+  }
+
+  return lead;
 }
 
-async function getChatbotReply({ message, history = [], meta = {} }) {
+async function getChatbotReply({ message, history = [], meta = {}, sessionId = '' }) {
   const userMessage = cleanMessage(message);
   if (!userMessage) {
     const error = new Error('Message is required');
@@ -89,7 +100,7 @@ Visitor: ${userMessage}
 Assistant:
   `.trim();
 
-  const savedLead = await saveChatLeadIfPresent({ message: userMessage, history, meta });
+  const savedLead = await saveChatLeadIfPresent({ message: userMessage, history, meta, sessionId });
   const reply = String(await aiService.callAI(prompt, 700) || '').trim();
   const leadNote = savedLead ? 'Thanks, I have saved your contact details. The Nexqira team will contact you soon.' : '';
   const body = [leadNote, reply || 'Thanks for your message.'].filter(Boolean).join('\n\n');

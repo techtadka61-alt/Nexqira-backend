@@ -1,4 +1,5 @@
 const ContactMessage = require('../models/ContactMessage');
+const VisitorSession = require('../models/VisitorSession');
 const { sendMail } = require('../services/emailService');
 
 function normalizeString(value) {
@@ -26,6 +27,7 @@ const submitContact = async (req, res) => {
     const subject = normalizeString(req.body?.subject);
     const message = normalizeString(req.body?.message);
     const source = normalizeString(req.body?.source) || 'web';
+    const sessionId = normalizeString(req.body?.sessionId).slice(0, 100);
 
     if (!name || name.length < 2) {
       return res.status(400).json({ success: false, message: 'Name is required' });
@@ -44,12 +46,20 @@ const submitContact = async (req, res) => {
       subject,
       message,
       source,
+      sessionId,
       meta: {
         ip: normalizeString(req.headers['x-forwarded-for'] || req.ip),
         userAgent: normalizeString(req.get('user-agent')),
         referer: normalizeString(req.get('referer'))
       }
     });
+
+    if (sessionId) {
+      VisitorSession.updateOne(
+        { sessionId, 'convertedLead.leadId': null },
+        { $set: { 'convertedLead.leadType': 'contact', 'convertedLead.leadId': doc._id, 'convertedLead.convertedAt': new Date() } }
+      ).catch(() => {});
+    }
 
     let emailSent = false;
     const to = (process.env.CONTACT_TO || '').trim();
