@@ -195,6 +195,23 @@ const trackSession = async (req, res) => {
   }
 };
 
+// Closes out the most recent still-open page view in a session (fills durationMs), used
+// both when the next page view arrives and when an explicit exit beacon fires. "Open" means
+// isExit: false - a page view already snapshotted by a backgrounding event (durationMs set,
+// isExit still false) is still open and gets its duration refreshed with the more accurate
+// value computed from an actual route change.
+async function closeLastPageView(sessionId, { at = new Date(), markExit = false } = {}) {
+  const last = await PageViewEvent.findOne({ sessionId, isExit: false }).sort({ timestamp: -1 });
+  if (!last) return;
+  const durationMs = Math.max(0, at.getTime() - last.timestamp.getTime());
+  last.durationMs = durationMs;
+  if (markExit) {
+    last.isExit = true;
+    last.exitAt = at;
+  }
+  await last.save();
+}
+
 // Public: called on every route change to record a page view within a session.
 const trackPageView = async (req, res) => {
   try {
@@ -203,14 +220,51 @@ const trackPageView = async (req, res) => {
 
     const path = String(req.body?.path || '').trim().slice(0, 300);
     const referrer = String(req.body?.referrer || '').trim().slice(0, 500);
+    const now = new Date();
 
     await Promise.all([
-      PageViewEvent.create({ sessionId, path, referrer }),
+      closeLastPageView(sessionId, { at: now }),
+      PageViewEvent.create({ sessionId, path, referrer, timestamp: now }),
       VisitorSession.updateOne(
         { sessionId },
-        { $set: { lastActivityAt: new Date() }, $inc: { pageViewCount: 1 } }
+        { $set: { lastActivityAt: now }, $inc: { pageViewCount: 1 } }
       )
     ]);
+
+    res.status(204).end();
+  } catch (error) {
+    res.status(204).end();
+  }
+};
+
+// Public: fired via navigator.sendBeacon on pagehide (confirmed exit, isExit: true) or
+// visibilitychange (tab backgrounded, may resume - isExit: false, duration snapshot only).
+// Route changes within the SPA already go through trackPageView above, which closes out
+// the previous page view's duration, so this only matters for the last page of a session.
+const trackPageExit = async (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || '').trim().slice(0, 100);
+    if (!sessionId) return res.status(204).end();
+
+    const durationMs = Number(req.body?.durationMs);
+    const isExit = Boolean(req.body?.isExit);
+    const now = new Date();
+
+    if (Number.isFinite(durationMs) && durationMs >= 0) {
+      // Match on isExit: false too, so a later confirmed exit can still update a page view
+      // whose duration was already snapshotted by an earlier backgrounding event.
+      const last = await PageViewEvent.findOne({ sessionId, isExit: false }).sort({ timestamp: -1 });
+      if (last) {
+        last.durationMs = Math.min(durationMs, 6 * 60 * 60 * 1000); // clamp to 6h, guards against clock skew/sleep
+        last.isExit = isExit;
+        if (isExit) last.exitAt = now;
+        await last.save();
+      }
+    } else if (isExit) {
+      await closeLastPageView(sessionId, { at: now, markExit: true });
+    }
+
+    await VisitorSession.updateOne({ sessionId }, { $set: { lastActivityAt: now } });
 
     res.status(204).end();
   } catch (error) {
@@ -317,7 +371,17 @@ const getPagesAndSources = async (req, res) => {
     const [topPages, topSources] = await Promise.all([
       PageViewEvent.aggregate([
         { $match: pageMatch },
-        { $group: { _id: '$path', count: { $sum: 1 } } },
+        {
+          $group: {
+            _id: '$path',
+            count: { $sum: 1 },
+            // Only views with a known duration count toward the average - an exit whose
+            // beacon never fired (e.g. browser killed) is excluded rather than counted as 0.
+            avgDurationMs: { $avg: '$durationMs' },
+            totalDurationMs: { $sum: { $ifNull: ['$durationMs', 0] } },
+            timedViews: { $sum: { $cond: [{ $ne: ['$durationMs', null] }, 1, 0] } }
+          }
+        },
         { $sort: { count: -1 } },
         { $limit: 20 }
       ]),
@@ -334,9 +398,93 @@ const getPagesAndSources = async (req, res) => {
       ])
     ]);
 
+    // Rank by average time-on-page ("interest") among pages with enough timed samples to
+    // be meaningful; pages with no timed views yet fall back to view-count order at the end.
+    const byInterest = [...topPages].sort((a, b) => {
+      const aAvg = a.timedViews ? a.avgDurationMs : -1;
+      const bAvg = b.timedViews ? b.avgDurationMs : -1;
+      return bAvg - aAvg;
+    });
+
     res.json({
-      topPages: topPages.map((p) => ({ path: p._id || '(unknown)', count: p.count })),
+      topPages: topPages.map((p) => ({
+        path: p._id || '(unknown)',
+        count: p.count,
+        avgDurationMs: p.timedViews ? Math.round(p.avgDurationMs) : null,
+        totalDurationMs: p.totalDurationMs,
+        timedViews: p.timedViews
+      })),
+      topPagesByInterest: byInterest.map((p) => ({
+        path: p._id || '(unknown)',
+        count: p.count,
+        avgDurationMs: p.timedViews ? Math.round(p.avgDurationMs) : null,
+        timedViews: p.timedViews
+      })),
       topSources: topSources.map((s) => ({ source: s._id || 'direct', count: s.count }))
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Admin: paginated list of visitor sessions (the session-based footprint list), richer than
+// the legacy IP-keyed getVisitors - includes referrer/UTM/landing page/return status and links
+// to the full per-page journey via sessionId.
+const getVisitorSessions = async (req, res) => {
+  try {
+    const { search, page = 1, limit = 20, from, to } = req.query;
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const query = {};
+    const activityRange = dateRange({ from, to });
+    if (activityRange) query.firstActivityAt = activityRange;
+    if (search && String(search).trim()) {
+      const escaped = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      query.$or = [{ ip: regex }, { 'location.city': regex }, { 'location.region': regex }, { 'location.country': regex }, { 'device.browser': regex }, { 'device.os': regex }, { landingPage: regex }, { referrer: regex }];
+    }
+    const [items, total] = await Promise.all([
+      VisitorSession.find(query).sort({ lastActivityAt: -1 }).skip((pageNum - 1) * limitNum).limit(limitNum).lean(),
+      VisitorSession.countDocuments(query)
+    ]);
+    res.json({ items, total, page: pageNum, pages: Math.ceil(total / limitNum) || 1 });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Admin: full page-view timeline for one visitor session - entry page, per-page duration,
+// exit page/time. This is the data backing the "visitor details" page.
+const getVisitorJourney = async (req, res) => {
+  try {
+    const sessionId = String(req.params.sessionId || '').trim().slice(0, 100);
+    if (!sessionId) return res.status(400).json({ message: 'sessionId is required' });
+
+    const [session, pageViews] = await Promise.all([
+      VisitorSession.findOne({ sessionId }).lean(),
+      PageViewEvent.find({ sessionId }).sort({ timestamp: 1 }).lean()
+    ]);
+
+    if (!session) return res.status(404).json({ message: 'Visitor session not found' });
+
+    const exitEvent = pageViews.find((p) => p.isExit) || pageViews[pageViews.length - 1] || null;
+    const totalTimeMs = pageViews.reduce((sum, p) => sum + (p.durationMs || 0), 0);
+
+    res.json({
+      session,
+      pageViews: pageViews.map((p) => ({
+        path: p.path,
+        referrer: p.referrer,
+        enteredAt: p.timestamp,
+        durationMs: p.durationMs,
+        isExit: Boolean(p.isExit),
+        exitAt: p.exitAt
+      })),
+      entryPage: pageViews[0]?.path || session.landingPage || null,
+      exitPage: exitEvent?.path || null,
+      exitAt: exitEvent?.exitAt || null,
+      totalTimeMs,
+      pageCount: pageViews.length
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -384,9 +532,12 @@ module.exports = {
   trackVisit,
   trackSession,
   trackPageView,
+  trackPageExit,
   getMonthlyStats,
   getVisitors,
   getVisitor,
+  getVisitorSessions,
+  getVisitorJourney,
   getOverview,
   getGeoBreakdown,
   getTimeseries,

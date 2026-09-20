@@ -15,7 +15,15 @@ const pageViewEventSchema = new mongoose.Schema({
     // ANALYTICS_RETENTION_DAYS later requires a manual collMod on the deployed
     // collection, not just a redeploy - the index does not "hot reload".
     expires: RETENTION_SECONDS
-  }
+  },
+  // Filled in later: either when the next page view arrives in the same session
+  // (duration = next.timestamp - this.timestamp), or via the exit beacon when the
+  // visitor leaves the site from this page.
+  durationMs: { type: Number, default: null },
+  // True once we know this was the last page viewed in the session (exit beacon fired,
+  // or the session ended without a subsequent page view before the tab closed).
+  isExit: { type: Boolean, default: false },
+  exitAt: { type: Date, default: null }
 });
 
 pageViewEventSchema.index({ sessionId: 1, timestamp: -1 });
