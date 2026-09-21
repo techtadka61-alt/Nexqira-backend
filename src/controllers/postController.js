@@ -679,6 +679,15 @@ const createPost = async (req, res) => {
         post.metadata.platformStatus[p] = { ...(post.metadata.platformStatus[p] || {}), status: 'not_published' };
       }
     }
+
+    // If the admin published immediately (status sent as 'published'), mark the
+    // blog platform as published now instead of leaving it 'pending' — otherwise
+    // recomputeOverallStatus below would silently downgrade the post back to
+    // 'pending' and it would never show up on the public website.
+    if (body.status === 'published' && selected.has('blog')) {
+      await publishToBlog(post);
+    }
+
     recomputeOverallStatus(post);
     post.markModified('metadata');
     await post.save();

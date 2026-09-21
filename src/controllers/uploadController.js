@@ -1,21 +1,20 @@
-const path = require('path');
-const fs = require('fs');
 const multer = require('multer');
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
-const uploadsDir = path.join(process.cwd(), 'uploads');
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
-    const safeExt = ['.jpg', '.jpeg', '.png', '.webp'].includes(ext) ? ext : '.jpg';
-    const name = `img_${Date.now()}_${Math.random().toString(16).slice(2)}${safeExt}`;
-    cb(null, name);
-  }
+const storage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'nexqira-blog',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+    public_id: (req, file) => `img_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+  },
 });
 
 const fileFilter = (req, file, cb) => {
@@ -35,14 +34,9 @@ const handleUploadImage = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
-    const relativeUrl = `/uploads/${req.file.filename}`;
-    const origin = req.headers['x-forwarded-proto']
-      ? `${req.headers['x-forwarded-proto']}://${req.headers.host}`
-      : `${req.protocol}://${req.get('host')}`;
-
     res.json({
-      url: `${origin}${relativeUrl}`,
-      path: relativeUrl,
+      url: req.file.path,
+      path: req.file.path,
       filename: req.file.filename
     });
   } catch (error) {
