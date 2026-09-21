@@ -1,9 +1,12 @@
 // backend/src/controllers/blogController.js
 const Post = require('../models/Post');
 const Log = require('../models/Log');
+const PostView = require('../models/PostView');
+const PostLike = require('../models/PostLike');
+const { getClientIp, hashVisitor } = require('../utils/visitorHash');
 
 // Format post for website display
-const formatPostForWebsite = (post) => {
+const formatPostForWebsite = (post, viewerHasLiked) => {
   const title = post.blogTitle || post.title;
   const primaryCategory = post.category || post.metadata?.categories?.[0] || 'Technology';
   return {
@@ -18,6 +21,9 @@ const formatPostForWebsite = (post) => {
     categories: [primaryCategory, ...(post.metadata?.categories || []).filter((c) => c && c !== primaryCategory)],
     tags: post.metadata?.tags || [],
     readingTime: calculateReadingTime(post.content),
+    views: post.views || 0,
+    likes: post.likes || 0,
+    ...(viewerHasLiked !== undefined ? { viewerHasLiked } : {}),
     seo: {
       title,
       description: post.excerpt,
@@ -25,6 +31,16 @@ const formatPostForWebsite = (post) => {
       ogImage: post.featuredImage
     }
   };
+};
+
+// Resolve a stable per-visitor hash for view/like deduplication, preferring
+// a client-generated id (already used by the analytics tracker) and falling
+// back to IP + user-agent for clients that don't send one.
+const resolveVisitorHash = (req) => {
+  const clientId = String(req.body?.clientId || req.query?.clientId || '').trim().slice(0, 100) || null;
+  const ip = getClientIp(req);
+  const userAgent = req.get('user-agent');
+  return hashVisitor({ ip, userAgent, clientId });
 };
 
 // Calculate reading time
@@ -94,26 +110,86 @@ const getWebsitePostBySlug = async (req, res) => {
     }).select('-linkedInContent -metadata.linkedInPost');
     
     if (!post) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Post not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Post not found'
       });
     }
-    
-    // Increment view count
-    post.views = (post.views || 0) + 1;
-    await post.save();
-    
+
+    const visitorHash = resolveVisitorHash(req);
+
+    // Only count a view the first time this visitor is seen for this post
+    // within the dedup window (see PostView's TTL index). The unique index
+    // on {postId, visitorHash} makes this safe under concurrent requests —
+    // a duplicate insert simply throws E11000, which we ignore.
+    try {
+      await PostView.create({ postId: post._id, visitorHash });
+      post.views = (post.views || 0) + 1;
+      await Post.updateOne({ _id: post._id }, { $inc: { views: 1 } });
+    } catch (err) {
+      if (err.code !== 11000) throw err;
+    }
+
+    const viewerHasLiked = Boolean(await PostLike.exists({ postId: post._id, visitorHash }));
+
     res.json({
       success: true,
-      post: formatPostForWebsite(post)
+      post: formatPostForWebsite(post, viewerHasLiked)
     });
   } catch (error) {
     console.error('Error fetching post:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch post' 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch post'
     });
+  }
+};
+
+// Toggle like/unlike for a post, deduped per-visitor the same way as views.
+const toggleLike = async (req, res) => {
+  try {
+    const { slug } = req.params;
+
+    const post = await Post.findOne({
+      slug,
+      status: 'published',
+      platforms: { $in: ['blog'] }
+    }).select('_id likes');
+
+    if (!post) {
+      return res.status(404).json({ success: false, message: 'Post not found' });
+    }
+
+    const visitorHash = resolveVisitorHash(req);
+    const existing = await PostLike.findOne({ postId: post._id, visitorHash });
+
+    let liked;
+    if (existing) {
+      await PostLike.deleteOne({ _id: existing._id });
+      await Post.updateOne({ _id: post._id }, { $inc: { likes: -1 } });
+      liked = false;
+    } else {
+      try {
+        await PostLike.create({ postId: post._id, visitorHash });
+        await Post.updateOne({ _id: post._id }, { $inc: { likes: 1 } });
+        liked = true;
+      } catch (err) {
+        // Duplicate like from a concurrent request — treat as already liked.
+        if (err.code !== 11000) throw err;
+        liked = true;
+      }
+    }
+
+    const updated = await Post.findById(post._id).select('likes');
+
+    res.json({
+      success: true,
+      liked,
+      likes: updated?.likes || 0
+    });
+  } catch (error) {
+    console.error('Error toggling like:', error);
+    res.status(500).json({ success: false, message: 'Failed to update like' });
   }
 };
 
@@ -194,5 +270,6 @@ module.exports = {
   getWebsitePosts,
   getWebsitePostBySlug,
   getRelatedPosts,
-  getBlogMetadata
+  getBlogMetadata,
+  toggleLike
 };

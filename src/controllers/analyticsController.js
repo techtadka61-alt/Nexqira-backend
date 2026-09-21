@@ -1,28 +1,12 @@
 // backend/src/controllers/analyticsController.js
-const crypto = require('crypto');
 const Visitor = require('../models/Visitor');
 const VisitorSession = require('../models/VisitorSession');
 const PageViewEvent = require('../models/PageViewEvent');
 const { resolveLocation } = require('../services/geoService');
-
-const VISITOR_SALT = process.env.VISITOR_HASH_SALT || process.env.JWT_SECRET || 'nexqira-visitor-salt';
+const { normalizeIp, hashVisitor } = require('../utils/visitorHash');
 
 function todayUTC(date = new Date()) {
   return date.toISOString().slice(0, 10); // YYYY-MM-DD
-}
-
-function normalizeIp(ip) {
-  const raw = String(ip || '').trim();
-  // Take first IP if a forwarded-for chain, normalize IPv6-mapped IPv4.
-  const first = raw.split(',')[0].trim();
-  return first.replace(/^::ffff:/i, '');
-}
-
-function hashVisitor({ ip, userAgent, clientId }) {
-  const base = clientId
-    ? `client:${clientId}`
-    : `ip-ua:${normalizeIp(ip)}:${String(userAgent || '').slice(0, 200)}`;
-  return crypto.createHash('sha256').update(`${base}:${VISITOR_SALT}`).digest('hex');
 }
 
 function parseDevice(userAgent = '') {
