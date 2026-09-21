@@ -3,6 +3,7 @@ const Post = require('../models/Post');
 const publicSiteUrl = String(process.env.PUBLIC_SITE_URL || 'https://nexqira.online').trim().replace(/\/$/, '');
 const Log = require('../models/Log');
 const linkedinService = require('../services/linkedinService');
+const { sanitizePostContent } = require('../utils/sanitizeHtml');
 
 const KNOWN_PLATFORMS = ['blog', 'linkedin'];
 
@@ -514,7 +515,7 @@ const updatePost = async (req, res) => {
     if (typeof title === 'string') post.title = title;
     if (typeof blogTitle === 'string') post.blogTitle = blogTitle;
     if (typeof linkedInTitle === 'string') post.linkedInTitle = linkedInTitle;
-    if (typeof content === 'string') post.content = content;
+    if (typeof content === 'string') post.content = sanitizePostContent(content);
     if (typeof excerpt === 'string') post.excerpt = excerpt;
     if (typeof featuredImage === 'string') post.featuredImage = featuredImage;
     if (typeof linkedInContent === 'string') post.linkedInContent = linkedInContent;
@@ -661,6 +662,7 @@ const createPost = async (req, res) => {
       linkedInTitle,
       slug,
       category,
+      content: typeof body.content === 'string' ? sanitizePostContent(body.content) : body.content,
       metadata: {
         ...(body.metadata || {}),
         categories: [category, ...((body.metadata?.categories || []).filter((c) => c && c !== category))]
